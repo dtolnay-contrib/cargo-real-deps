@@ -1,13 +1,15 @@
-use cargo::{
-    core::{resolver::Method, InternedString, PackageIdSpec, Workspace},
-    ops,
-    util::{
-        command_prelude::{App, Arg},
-        config::Config,
-        errors::CargoResult,
-    },
-};
-use std::{collections::BTreeSet, path::Path, rc::Rc};
+use cargo::core::compiler::{CompileKind, RustcTargetData};
+use cargo::core::resolver::features::{ForceAllTargets, HasDevUnits, RequestedFeatures};
+use cargo::core::resolver::ResolveOpts;
+use cargo::core::{PackageIdSpec, Workspace};
+use cargo::ops;
+use cargo::util::command_prelude::{App, Arg};
+use cargo::util::config::Config;
+use cargo::util::errors::CargoResult;
+use cargo::util::interning::InternedString;
+use std::collections::BTreeSet;
+use std::env;
+use std::rc::Rc;
 
 fn main() -> CargoResult<()> {
     let matches = App::new("cargo-real-deps")
@@ -38,31 +40,39 @@ fn main() -> CargoResult<()> {
         )
         .get_matches();
 
-    let path = Path::new(matches.value_of("path").unwrap())
-        .canonicalize()
-        .unwrap();
+    let path = env::current_dir()
+        .unwrap()
+        .join(matches.value_of("path").unwrap());
     let all_features = matches.is_present("all-features");
     let uses_default_features = !matches.is_present("no-default-features");
-    let features = Rc::new(
-        matches
-            .values_of("features")
-            .map(|v| v.map(InternedString::new).collect::<BTreeSet<_>>())
-            .unwrap_or(BTreeSet::new()),
-    );
+    let features = matches
+        .values_of("features")
+        .map_or_else(BTreeSet::new, |v| v.map(InternedString::new).collect());
 
     let config = Config::default()?;
     let ws = Workspace::new(&path, &config)?;
-    let specs = vec![PackageIdSpec::from_package_id(
-        ws.current().unwrap().package_id(),
-    )];
-
-    let method = Method::Required {
+    let requested_kinds = [CompileKind::Host];
+    let target_data = RustcTargetData::new(&ws, &requested_kinds)?;
+    let opts = ResolveOpts {
         dev_deps: false,
-        features,
-        all_features,
-        uses_default_features,
+        features: RequestedFeatures {
+            features: Rc::new(features),
+            all_features,
+            uses_default_features,
+        },
     };
-    let (_package_set, resolve) = ops::resolve_ws_with_method(&ws, method, &specs)?;
+    let package_id = ws.current().unwrap().package_id();
+    let specs = [PackageIdSpec::from_package_id(package_id)];
+    let workspace_resolve = ops::resolve_ws_with_opts(
+        &ws,
+        &target_data,
+        &requested_kinds,
+        &opts,
+        &specs,
+        HasDevUnits::No,
+        ForceAllTargets::No,
+    )?;
+    let resolve = workspace_resolve.targeted_resolve;
 
     let package_ids = resolve.sort();
     /*
@@ -76,13 +86,8 @@ fn main() -> CargoResult<()> {
     println!("workspace members: {:?}", members);
     */
 
-    for id in &package_ids {
-        println!(
-            "{} {} {:?}",
-            id.name(),
-            id.version(),
-            resolve.features(id.clone())
-        );
+    for id in package_ids {
+        println!("{} {} {:?}", id.name(), id.version(), resolve.features(id));
     }
 
     Ok(())
